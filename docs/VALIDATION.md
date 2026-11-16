@@ -1,158 +1,152 @@
-# TCP 控制实验的验证与复现
+# TCP 控制实验的验证报告
 
-验证使用真实 ns-3 TCP 传输和 GLM API 请求，检查数据交付、协议恢复、模型动作生效和统计计算。记录的环境为 Ubuntu 26.04.1 x86_64、GCC 15.2.0、CMake 4.2.3、Ninja 1.13.2、ns-3.49、uv 0.12.1 和 Python 3.12.13。Linux 已执行实际构建与运行，macOS 实机验证状态为待执行。
+## 1. 实验设置与验证范围
 
-下文命令均在项目根目录执行。需要 C++23 编译器、CMake 3.25 及以上、Ninja、uv 和安装好的 ns-3.49。构建脚本根据 `.python-version` 安装解释器，使用 `uv.lock` 同步 `.venv`，通过 CMake FetchContent 获取并校验 nlohmann/json 3.12.0：
+实验分别检查 TCP 协议执行、容量变化下的传输表现，以及 GLM 决策的生效过程、诊断准确率和重复选择的一致性。环境为 Ubuntu 26.04.1 x86_64、GCC 15.2.0、CMake 4.2.3、Ninja 1.13.2、ns-3.49、uv 0.12.1 和 Python 3.12.13。
 
-```bash
-bash scripts/build.sh
-uv lock --check
-```
+网络采用哑铃拓扑：每条连接经两个路由器之间的共享瓶颈传输数据，ACK 沿原路径返回。两侧接入链路各为 1 Gbit/s、单向传播时延 1 ms；瓶颈单向传播时延为 20 ms，基础传播 RTT 为 44 ms。默认瓶颈 FIFO 为 110000 字节，MSS 为 1448 字节，发送和接收缓冲区各为 16 MiB。
 
-自定义 ns-3 安装位置通过 `bash scripts/build.sh -DCMAKE_PREFIX_PATH="$NS3_PREFIX"` 传入，其中 `NS3_PREFIX` 为自己的安装前缀。GLM 步骤需要在终端配置自己的 `ZHIPU_API_KEY`，模型标识固定为 `glm-4-flash-250414`。各个 `--output` 目录必须尚未存在；重复复现时统一更换输出目录前缀。
-
-[技术说明](DESIGN.md)提供完整字段定义，[使用说明](../README.md)介绍四个入门配置。以下实验各自列出所需条件、步骤和结果判定。
-
-**基本传输验证字节交付。** [smoke.json](../configs/smoke.json)建立一条 Reno 连接，在 1 s 启动、3 s 停止提交新数据，继续运行至 12 s。瓶颈为 20 Mbit/s、单向传播时延 20 ms、FIFO 110000 字节；接入链路为 1 Gbit/s、单向时延 1 ms。关闭启动时间偏移，统计区间为 `[1,3)` 和 `[3,12)`。
-
-```bash
-uv run --locked tcp-lab run configs/smoke.json --output results/reproduce-transfer
-uv run --locked tcp-lab analyze results/reproduce-transfer
-```
-
-运行生成完整配置、事件、周期采样和字节统计。分析生成 `metrics.json`、`curves.png` 和 `curves.pdf`。读取 `network.json`，应满足以下关系：
-
-- `sent_bytes = received_bytes = acked_bytes`，说明应用提交的数据已交付并确认。
-- `tx_bytes - retrans_bytes = sent_bytes`，用于核对完整传输中的首次发送字节数。
-- `pending_bytes = 0`，说明截止时待交付数据已经清空。
-
-已记录的实测中，三项提交、接收、确认计数均为 21,150,176 字节。独立 CMake 构建目录编译出的程序也完成了相同场景的交付。`status=complete` 表示仿真正常结束；交付是否完成由上述字节计数判定。
-
-**确定性丢包验证经典恢复过程。** [protocol.json](../configs/protocol.json)将 Reno 初始窗口设为 1 MSS，阈值设为 32 MSS，MSS 为 1448 字节。关闭 SACK，每段立即确认，恢复算法为 `TcpClassicRecovery`，队列为 1000000 字节。正向瓶颈接收端丢弃从零计数的第 150 号包，包序列包含握手包。连接在 1 至 8 s 提供数据，仿真至 18 s，开启逐包事件和 PCAP。
-
-```bash
-uv run --locked tcp-lab run configs/protocol.json --output results/reproduce-protocol
-uv run --locked tcp-lab analyze results/reproduce-protocol
-```
-
-| 验证内容 | 检查事件或数据 | 已记录结果 |
+| 实验 | 具体条件 | 已有记录 |
 | --- | --- | --- |
-| 慢开始与拥塞避免 | `cwnd` 从 1 MSS 增长，达到阈值后继续按 Reno 增长 | 自动测试通过 |
-| 指定丢包 | `error_drop.check_index` 为 150 | 一个指定包被丢弃 |
-| 快重传 | 同一 ACK 序号重复出现，重传发生在最小 1 s 超时之前 | 自动测试通过 |
-| 快恢复 | `CA_RECOVERY` 之后出现 `CA_OPEN` | 自动测试通过 |
-| 超时恢复 | 独立中断场景出现 `CA_LOSS`，窗口重置为 1 MSS，随后恢复接收 | 自动测试通过 |
+| 基本传输 | 一条 Reno 连接，1 至 3 s 提供数据，仿真至 12 s，关闭启动偏移 | 数据交付及计数核验 |
+| 经典恢复 | 初始窗口 1 MSS、阈值 32 MSS，关闭 SACK，每段立即确认，使用经典恢复；队列 1000000 字节；丢弃正向接收序列中从零计数的第 150 号包 | 窗口、ACK、丢包、重传和恢复事件 |
+| 容量变化 | Reno、CUBIC、GLM 控制的 Reno 各运行一条连接；60 s 从 20 降至 5 Mbit/s，120 s 恢复至 20 Mbit/s | 每种算法一次独立运行 |
+| 容量参考 | 固定 5、20、50 Mbit/s；Reno 初始窗口 1000 MSS、阈值 1448000 字节；队列 16 MiB；1 至 10 s 提供数据，仿真至 20 s | 三个无损参考运行 |
+| 模型一致性 | 从 Reno 容量变化运行抽取 30 个观测，每个独立请求 5 次 | 150 次实际请求 |
+| 自动测试 | 传输、恢复、网络变化、竞争、模型接口、延迟与重放 | 22 项通过 |
 
-超时测试在 2 至 4 s 将正向错误模型丢弃概率设为 1；它使用独立配置运行。`rto_value` 表示计时器数值变化，超时事件统计依据为进入 `CA_LOSS`。
+容量变化运行使用 `seed=73`、`run=1`，连接在 1 s 加 0 至 0.1 s 均匀偏移后启动，180 s 停止提供新数据，210 s 结束仿真。TCP 初始窗口为 10 MSS，初始阈值为 4294967295 字节；SACK、Timestamp 和窗口扩大开启，ECN 关闭，延迟确认计数为 2，使用 PRR，最小重传超时为 1 s。队列容量保持固定，随机丢包概率为 0。
 
-**容量变化实验检验对网络条件的响应。** 三个算法各运行一条持续供给数据的连接，其余条件一致：
+GLM 使用 `glm-4-flash-250414`，每 1 s 接收最多五个观测窗口，从 0.4、0.5、0.6、0.7、0.8 中选择窗口保留比例。容量变化运行采用零仿真决策延迟，真实 API 耗时单独记录。
 
-| 参数 | 实验值 |
-| --- | --- |
-| 拓扑 | 哑铃拓扑，每侧接入链路 1 Gbit/s、单向 1 ms |
-| 瓶颈 | 初始 20 Mbit/s，单向传播时延 20 ms，FIFO 110000 字节 |
-| TCP | MSS 1448 字节，初始窗口 10 MSS，初始阈值 4294967295 字节，发送和接收缓冲区各 16 MiB |
-| TCP 选项 | SACK、Timestamp、窗口扩大开启；ECN 关闭；延迟确认计数为 2；使用 PRR；最小重传超时 1 s |
-| 随机配置 | `seed=73`、`run=1`，启动时间为 1 s 加 0 至 0.1 s 的均匀偏移 |
-| 网络变化 | 60 s 降至 5 Mbit/s，120 s 恢复 20 Mbit/s；队列字节容量固定 |
-| 停止时间 | 180 s 停止提供新数据，210 s 结束仿真 |
-| 稳定区间 | `[20,60)`、`[80,120)`、`[140,180)` |
-| 模型配置 | 每 1 s 请求一次，携带最多五个窗口；允许比例为 0.4 至 0.8、步长 0.1；零仿真决策延迟 |
-| 采样与损失 | 周期采样 0.1 s，随机丢包概率为 0；队列可能因拥塞丢弃数据包 |
+现有实测覆盖上表项目。实验生成器另提供 96 个场景，每场景 20 次重复可生成 1920 项配置；完整矩阵尚未全部执行。平台实测已完成 Linux，macOS 实机验证待执行。
 
-首先生成配置。`--runs 1` 为 96 个场景各生成一个运行编号为 1 的 JSON 文件，下面选择其中三种容量参考和三种容量变化场景：
+## 2. 协议与功能验证
 
-```bash
-uv run --locked tcp-lab matrix --output results/reproduce-configs --runs 1
-```
+协议验证通过报文和状态事件检查实现行为。基本传输场景检查数据是否完整交付，确定性丢包场景观察快恢复，独立中断场景观察超时恢复。
 
-无损参考用于测量相同报文与链路条件下的有效传输能力。参考场景分别固定为 5、20、50 Mbit/s，使用 Reno，初始窗口 1000 MSS，初始阈值 1448000 字节，队列 16 MiB，关闭启动偏移和随机丢包；1 至 10 s 提供数据，20 s 结束，在 `[4,10)` 测量吞吐量。较大的在途数据量使参考连接能够充分使用链路。
+| 验证对象 | 判定依据 | 实测结果 |
+| --- | --- | --- |
+| 数据交付 | 应用提交、接收和 ACK 确认计数相等，截止时待交付字节数为 0 | 三项计数均为 21,150,176 字节 |
+| 首次发送计数 | 全部发送有效载荷减去重传有效载荷，等于应用提交字节数 | 核验通过 |
+| 慢开始与拥塞避免 | 窗口从 1 MSS 增长，达到阈值后继续按 Reno 机制增长 | 自动测试通过 |
+| 快重传与快恢复 | 指定丢包后出现重复 ACK，重传早于最小 1 s 超时，随后进入 `CA_RECOVERY` 并返回 `CA_OPEN` | 自动测试通过 |
+| 超时恢复 | 在 2 至 4 s 中断场景中出现 `CA_LOSS`，窗口重置为 1 MSS，随后恢复接收 | 自动测试通过 |
+| 模型动作与重放 | 决策编号对应实际阈值计算；保存动作重放时，观测和事件一致 | 自动测试通过 |
+| 决策延迟与并发 | 分别检查 100 ms、500 ms、1 s 的启用时间，以及独立进程的请求串行执行 | 自动测试通过 |
+| 混合竞争 | Reno、CUBIC、GLM 共享瓶颈，三条连接均接收数据，模型动作属于 GLM 连接 | 自动测试通过 |
 
-```bash
-for capacity in 5 20 50; do
-  uv run --locked tcp-lab run "results/reproduce-configs/reference-${capacity}-01.json" --output "results/reproduce-runs/reference-${capacity}-01"
-  uv run --locked tcp-lab analyze "results/reproduce-runs/reference-${capacity}-01"
-done
-```
+字节计数位于 `network.json` 的 `flows` 数组，协议过程保存在 `events.jsonl`。`status=complete` 表示仿真正常结束，`pending_bytes` 表示截止时尚未交付的应用数据；这两个字段分别描述运行状态和交付状态。
 
-检查各参考运行的 `network.json`：`error_drops` 和各队列 `dropped` 应为 0。分析器在使用参考结果时也会检查这一条件。参考吞吐量从各自 `metrics.json` 的第一个评价区间读取。
+已有完整测试报告包含 22 项通过记录。CTest 的非 API 测试、Ruff 检查和 uv 依赖锁定检查也已通过。独立 CMake 构建目录编译出的程序完成了相同基本传输场景的交付。
 
-随后运行三种算法，并提供 5、20 Mbit/s 的参考目录。`--references` 读取已完成的配置、网络统计和指标文件：
+## 3. 容量变化下的传输表现
 
-```bash
-for algorithm in reno cubic glm; do
-  uv run --locked tcp-lab run "results/reproduce-configs/capacity-${algorithm}-01.json" --output "results/reproduce-runs/capacity-${algorithm}-01"
-  uv run --locked tcp-lab analyze "results/reproduce-runs/capacity-${algorithm}-01" --references results/reproduce-runs/reference-5-01 results/reproduce-runs/reference-20-01
-done
-uv run --locked tcp-lab report results/reproduce-runs
-```
+### 3.1 阶段吞吐量
 
-有效吞吐量为统计区间内接收应用获得的有效字节数乘以 8，再除以区间长度。下表为已记录的一次独立运行，单位为 Mbit/s，每个算法的样本数量为 1。
+三个评价区间为 `[20,60)`、`[80,120)` 和 `[140,180)`，分别对应容量变化后的稳定阶段。有效吞吐量按区间内接收应用获得的有效字节数乘以 8，再除以区间长度计算。下表单位为 Mbit/s，每个算法的样本数量为 1。
 
-| 算法 | `[20,60)` | `[80,120)` | `[140,180)` |
+| 算法 | 20 Mbit/s 初始阶段 | 5 Mbit/s 阶段 | 20 Mbit/s 恢复阶段 |
 | --- | --- | --- | --- |
 | Reno | 19.280120 | 4.820102 | 19.280120 |
 | CUBIC | 19.280989 | 4.841822 | 19.280989 |
 | GLM 控制的 Reno | 19.280989 | 4.820102 | 19.280989 |
 
-三种算法在这些稳定区间都接近对应的无损参考吞吐量。模型控制的差异还需结合阈值事件、过渡过程、排队时延和多连接竞争结果判读。新一次模型调用使用其实际响应重新计算结果，保存的动作可用于重放同一次运行。
+无损参考运行在 `[4,10)` 测量有效吞吐量，其队列丢弃和误码丢弃均为 0。5、20 Mbit/s 链路的参考值分别约为 4.820875、19.279637 Mbit/s。三种算法在本次单连接运行的稳定区间均接近相应参考值。
 
-**恢复时间采用滑动窗口判据。** 变化后从第 1 s 开始，每隔 0.1 s 计算前 1 s 的有效吞吐量。达到新容量参考值的 90%，并在连续采样点保持至少 3 s 后，取首次达标时刻减去容量变化时刻。观察范围止于下一次变化或连接停止供给时间。
+### 3.2 变化后的恢复时间
 
-已记录的 5、20 Mbit/s 参考吞吐量分别约为 4.820875、19.279637 Mbit/s。GLM 运行在容量下降后的恢复时间为 3.3 s，容量恢复后的恢复时间为 1.0 s。对应数据在单次运行的 `metrics.json.recovery` 中。`reference_required` 表示需要提供参考结果，`not_reached` 表示在观察区间内未达到判据，`recovered` 表示已满足判据。
+容量变化后，从第 1 s 开始每隔 0.1 s 计算前 1 s 的有效吞吐量。达到新容量参考值的 90%，并在连续采样点保持至少 3 s 后，以首次达标时刻减去容量变化时刻作为恢复时间。观察范围止于下一次变化或连接停止供给时间。
 
-**模型动作通过事件关联验证。** 已记录的 GLM 容量变化运行产生 185 次参数启用和 43 次阈值计算事件。比例 0.5、0.6、0.7、0.8 分别出现 61、91、31、2 次。检查 `decisions.jsonl` 的动作，再用 `decision_id` 找到 `events.jsonl` 中的 `action` 和 `threshold_compute`，核对阈值是否满足：
+| GLM 运行中的变化 | 恢复时间 |
+| --- | --- |
+| 20 降至 5 Mbit/s | 3.3 s |
+| 5 恢复至 20 Mbit/s | 1.0 s |
 
-$$
-ssthresh=1448\cdot\max\left(2,\left\lfloor\frac{\beta\cdot cwnd}{1448}\right\rfloor\right)
-$$
+阶段吞吐量衡量稳定传输能力，恢复时间衡量变化后的响应过程。两项指标共同描述这次容量变化运行；多连接带宽分配通过竞争场景评价。
 
-`decision_id=initial` 表示首次模型响应前使用的初始比例。参数启用次数与阈值计算次数分别统计，因为阈值在拥塞事件中计算。
+## 4. 模型决策与实际行为
 
-该次运行的实际 API 耗时中位数约为 3.56 s，P95 约为 5.18 s。仿真决策延迟为 0，等待服务响应时仿真时间暂停。自动测试另外验证了 100 ms、500 ms 和 1 s 的仿真启用延迟。
+### 4.1 参数选择与阈值计算
 
-**诊断评价使用真实丢弃事件生成标签。** 对每次决策最近 1 s 的本连接记录，按队列丢弃、误码丢弃、两者同时存在或均未出现，标注 `queue_loss`、`random_loss`、`mixed_loss` 或 `no_loss`。模型还可以输出 `uncertain`。准确率为正确分类数量除以全部决策数量，同时报告作答覆盖率和混淆矩阵。
+GLM 容量变化运行产生 185 次参数启用和 43 次阈值计算事件。每次阈值计算将当前 `cwnd` 乘以有效比例，向下取整为 1448 字节的整数倍，下限为 2896 字节。参数启用和阈值计算通过 `decision_id` 关联；`initial` 表示首次模型响应前使用的比例 0.5。
 
-| 该次容量变化运行的真实标签 | 模型输出 | 数量 |
+| 窗口保留比例 | 0.4 | 0.5 | 0.6 | 0.7 | 0.8 |
+| --- | --- | --- | --- | --- | --- |
+| 模型选择次数 | 0 | 61 | 91 | 31 | 2 |
+
+参数启用次数与阈值计算次数分别反映模型选择和拥塞事件。同一个有效比例可以用于多次阈值计算，也可能在下一次拥塞前被新决策更新。
+
+该次运行的 API 实际耗时中位数约为 3.56 s，P95 约为 5.18 s。等待响应期间仿真时间暂停，因此这组网络性能数据对应第 1 节所列的零仿真决策延迟。
+
+### 4.2 丢包原因诊断
+
+诊断标签依据每次决策前 1 s 内本连接的真实丢弃事件生成。队列丢弃、误码丢弃、两者同时存在和均未出现，分别对应 `queue_loss`、`random_loss`、`mixed_loss` 和 `no_loss`。模型还可以回答 `uncertain`。
+
+| 真实标签 | 模型输出 | 窗口数量 |
 | --- | --- | --- |
 | `no_loss` | `no_loss` | 139 |
 | `queue_loss` | `no_loss` | 46 |
 
-总体准确率为 `139/185 = 75.14%`，队列丢包窗口的正确分类数量为 0。该分布表明，诊断准确率需要结合类别数量理解。阈值控制效果使用网络指标评价，诊断结果另行核验。
+总体准确率为 `139/185 = 75.14%`，队列丢包窗口的正确分类数量为 0。模型在这些窗口中均选择了 `no_loss`，因此总体准确率与无丢包窗口的占比相同。诊断评价保留这一类别分布，控制效果则使用第 3 节的网络指标衡量。
 
-**固定观测实验检查重复请求的一致性。** 输入来自前述 Reno 容量变化运行的观测事件。程序从按时间排列的事件中等间隔选取 30 个样本，每个独立请求 5 次：
+### 4.3 重复选择的一致性
 
-```bash
-uv run --locked tcp-lab consistency results/reproduce-runs/capacity-reno-01 --output results/reproduce-consistency --samples 30 --repeats 5
-```
+从 Reno 容量变化运行的观测序列中等间隔选取 30 个样本，每个样本独立请求 5 次。每个样本的一致率为最常见取值出现次数除以 5，比例选择和诊断分类分别统计。
 
-读取 `status.json`，应包含 `samples=30`、`requests=150` 和 `status=complete`。每个样本的 `beta_agreement` 与 `diagnosis_agreement` 为最常见取值出现次数除以 5。已记录的 30 个样本中，两项一致率均为 1。逐次输入输出保存在该命令生成的目录中。
+150 次实际请求已完成。在这 30 个样本中，`beta_agreement` 和 `diagnosis_agreement` 均为 1。一致率描述相同输入下重复输出的稳定性，分类准确率由真实丢弃事件核验。
 
-**共享瓶颈公平性通过多连接场景判读。** [competition-check.json](../configs/competition-check.json)让 Reno、CUBIC、GLM 各一条连接同时运行，共用 20 Mbit/s 瓶颈。连接在 1 至 4 s 供给数据，仿真至 7 s，评价区间为 `[2,4)` 和 `[4,7)`：
+## 5. 复现步骤
 
-```bash
-uv run --locked tcp-lab run configs/competition-check.json --output results/reproduce-competition
-uv run --locked tcp-lab analyze results/reproduce-competition
-```
+### 5.1 运行前提与协议场景
 
-每条连接应收到数据，模型动作应属于 GLM 连接。`metrics.json` 的每连接吞吐量和 `shares` 展示分配结果，Jain 指数为 `(各连接吞吐量之和)² ÷ (连接数 × 各吞吐量平方之和)`。三条同向活跃连接的指数越接近 1，分配越均衡；结合总吞吐量判断利用程度。活跃集合变化时，分析器按时间划分子区间并加权。
+在项目根目录执行命令，先按 [README](../README.md)完成构建，并为模型步骤配置自己的 `ZHIPU_API_KEY`。每个运行输出目录应尚未存在；重复复现时统一更换目录前缀。参数定义见 [DESIGN](DESIGN.md)。
 
-**自动验证检查协议与实现的一致性。** 配置密钥后执行全部测试，并生成可检查的 JUnit 报告：
+[smoke.json](../configs/smoke.json)用于核对完整交付，[protocol.json](../configs/protocol.json)用于检查指定丢包后的恢复过程。运行产生原始事件，分析生成指标与曲线：
 
 ```bash
-uv run --locked pytest --junitxml=results/reproduce-tests.xml
-ctest --test-dir build --output-on-failure
-uv run --locked ruff check .
+for scenario in smoke protocol; do
+  uv run --locked tcp-lab run "configs/${scenario}.json" --output "results/reproduce/${scenario}"
+  uv run --locked tcp-lab analyze "results/reproduce/${scenario}"
+done
 ```
 
-已记录的完整测试为 22 项，全部通过；CTest、Ruff 和依赖锁定检查通过。API 测试实际请求服务，并验证延迟生效、混合竞争、跨进程串行调用和保存动作的精确重放。非 API 测试可通过 `uv run --locked pytest -m 'not api'` 单独执行。
+在基本传输输出的 `network.json` 中核对第 2 节的字节关系；在协议输出的 `events.jsonl` 中检查 `error_drop`、`tcp_ack`、`retransmission` 和 `congestion`，PCAP 可用于检查对应报文。全部自动测试的执行方式见 README。
 
-**独立重复用于统计比较。** 生成器包含 96 个场景，`--runs 20` 为每个场景生成 20 次重复，共 1920 项配置。`seed` 固定为 73，`run` 从 1 至 20；每次先独立计算指标，再统计均值和基于 Student t 分布的 95% 置信区间。相同场景、区间和运行编号用于配对比较。
+### 5.2 生成容量实验配置与参考值
+
+生成器根据 [matrix.py](../python/tcp_lab/matrix.py)产生 96 个场景的配置。`--runs 1` 为每个场景生成运行编号 1；下面选用三个参考场景和三个容量变化场景。
 
 ```bash
-uv run --locked tcp-lab matrix --output results/statistical-configs --runs 20
-uv run --locked tcp-lab suite results/statistical-configs/manifest.json --output results/statistical-runs
-uv run --locked tcp-lab report results/statistical-runs
+uv run --locked tcp-lab matrix --output results/reproduce/configs --runs 1
+for capacity in 5 20 50; do
+  uv run --locked tcp-lab run "results/reproduce/configs/reference-${capacity}-01.json" --output "results/reproduce/reference-${capacity}-01"
+  uv run --locked tcp-lab analyze "results/reproduce/reference-${capacity}-01"
+done
 ```
 
-批量执行按清单记录各项状态；恢复时间需要在完成对应参考场景后，按前述 `--references` 流程分析选定运行。`runs.csv` 保留每次运行的指标，`summary.json` 记录统计区间、样本数、置信区间和配对差值。本报告的实测范围为自动测试、上述容量变化与无损参考运行、固定观测一致性实验；1920 项正式运行的清单已经验证，完整矩阵尚未全部执行。
+参考场景使用第 1 节的固定容量、大窗口和大队列设置。检查 `network.json` 的 `error_drops` 与各队列 `dropped` 均为 0；`metrics.json` 的第一个评价区间提供参考吞吐量。
+
+### 5.3 运行比较场景并计算恢复时间
+
+三份容量变化配置分别选择 Reno、CUBIC、GLM，其余条件与第 1 节一致。`--references` 读取已完成的 5、20 Mbit/s 参考配置、网络统计和指标文件。
+
+```bash
+for algorithm in reno cubic glm; do
+  uv run --locked tcp-lab run "results/reproduce/configs/capacity-${algorithm}-01.json" --output "results/reproduce/capacity-${algorithm}-01"
+  uv run --locked tcp-lab analyze "results/reproduce/capacity-${algorithm}-01" --references results/reproduce/reference-5-01 results/reproduce/reference-20-01
+done
+```
+
+`metrics.json.intervals` 保存三个阶段的吞吐量、RTT 和公平性；`recovery` 保存恢复时间。`recovered` 表示达到判据，`not_reached` 表示观察区间内未达到，`reference_required` 表示需要提供对应容量的参考结果。新一次 GLM 实验按实际响应重新统计，重放同一次控制过程的步骤见 README。
+
+### 5.4 检查一致性并汇总结果
+
+一致性检查使用前一步 Reno 运行中已经产生的观测，30 个样本各请求 5 次：
+
+```bash
+uv run --locked tcp-lab consistency results/reproduce/capacity-reno-01 --output results/reproduce/consistency --samples 30 --repeats 5
+uv run --locked tcp-lab report results/reproduce
+```
+
+一致性目录中的 `status.json` 应记录 `samples=30`、`requests=150`、`status=complete`；`consistency.json` 保存逐样本的一致率。汇总生成 `runs.csv`、`summary.json` 和比较图，保留场景、区间与样本数量。单次运行的置信区间为 `null`；需要独立重复的统计比较时，使用 README 中的批量实验流程。
