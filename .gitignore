@@ -1,0 +1,14 @@
+/docs/request/
+
+/.work/
+/.venv/
+/build/
+/results/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.env
+/.glm-api.lock
+
+.cache/

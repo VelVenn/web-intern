@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tcp-glm-lab"
+version = "0.1.0"
+description = "ns-3 TCP congestion control experiments with GLM decisions"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "httpx>=0.28,<0.29",
+  "filelock>=3.20,<4",
+  "pydantic>=2.10,<3",
+  "numpy>=2.2,<3",
+  "pandas>=2.2,<3",
+  "scipy>=1.15,<2",
+  "matplotlib>=3.10,<4",
+]
+
+[project.scripts]
+tcp-lab = "tcp_lab.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3,<9", "ruff>=0.11,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["python/tcp_lab"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["api: requires a real GLM API key and network", "integration: runs real ns-3 simulations"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

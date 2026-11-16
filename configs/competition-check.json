@@ -1,0 +1,11 @@
+{
+  "name": "competition-check",
+  "end_s": 7,
+  "start_jitter_s": 0,
+  "flows": [
+    {"algorithm": "reno", "start_s": 1, "stop_s": 4},
+    {"algorithm": "cubic", "start_s": 1, "stop_s": 4},
+    {"algorithm": "glm", "start_s": 1, "stop_s": 4}
+  ],
+  "evaluation": [[2, 4], [4, 7]]
+}

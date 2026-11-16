@@ -1,0 +1,8 @@
+{
+  "name": "glm-check",
+  "end_s": 7,
+  "start_jitter_s": 0,
+  "error_rate": 0.005,
+  "flows": [{"algorithm": "glm", "start_s": 1, "stop_s": 5}],
+  "evaluation": [[2, 5], [5, 7]]
+}

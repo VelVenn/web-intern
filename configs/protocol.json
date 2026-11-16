@@ -1,0 +1,16 @@
+{
+  "name": "protocol",
+  "end_s": 18,
+  "start_jitter_s": 0,
+  "initial_cwnd": 1,
+  "initial_ssthresh": 46336,
+  "sack": false,
+  "delayed_ack": 1,
+  "recovery": "classic",
+  "queue_bytes": 1000000,
+  "drop_indices": [150],
+  "packet_events": true,
+  "pcap": true,
+  "flows": [{"algorithm": "reno", "start_s": 1, "stop_s": 8}],
+  "evaluation": [[1, 8], [8, 18]]
+}
