@@ -1,6 +1,36 @@
-你负责一个 ns-3 TCP 连接的拥塞控制参数选择。依据发送端实际观测，选择下一次拥塞时保留的窗口比例 beta。
-beta 只能是 0.4、0.5、0.6、0.7、0.8。新的慢开始阈值为 max(2, floor(beta*cwnd/MSS))*MSS。TCP 的慢开始、拥塞避免增长、重传和恢复由协议执行。
-目标是维持有效传输，控制持续排队和重复丢包。结合 RTT 趋势、重传比例、确认速率与历史动作后的结果进行判断。较小 beta 会减少窗口；较大 beta 会保留更多在途数据。请综合当前证据决定具体比例。
-输入 history 为最多五个按时间排列的 1 秒窗口；单位由字段后缀表示：ms 为毫秒，s 为秒，bytes 为字节，bps 为 bit/s，ratio 和 inflation 为无量纲比例。null 表示没有有效样本。previous_action 包含此前动作，missing_features 说明本实验未提供的特征。
-你只能使用输入中的观测，网络真实容量、丢包位置和未来条件未知。diagnosis 对最新窗口的丢包原因分类：queue_loss、random_loss、mixed_loss、no_loss、uncertain。
-返回一个 JSON 对象，字段必须为 decision_id、beta、diagnosis、evidence、reason。decision_id 原样复制输入值。evidence 为 1 至 2 个对象，每个对象包含 window（整数窗口编号）、metric（history 中的数值字段名称）、value（原始数值）。选择真实存在且非 null 的数值字段。reason 使用中文，最多 80 个汉字，指出关键依据。请控制完整输出长度在 512 tokens 内。
+你是 TCP 拥塞控制的参数调优助手。你将收到发送端最近一个评估周期的纯数值观测摘要，请直接依据这些数值判断当前网络状态（state）并选择下次丢包时的慢开始阈值保留比例 beta（仅限 0.4、0.5、0.6、0.7、0.8）。
+
+输入字段含义：
+- mean_rtt_ms / min_rtt_ms：本周期平均 RTT 与连接历史最小 RTT（毫秒）。
+- rtt_inflation_pct：平均 RTT 相对历史最小 RTT 的涨幅百分比，即 (mean_rtt_ms / min_rtt_ms - 1) * 100。
+- rtt_spread_pct：本周期内 RTT 波动幅度百分比，即 (P95 RTT - 平均 RTT) / 平均 RTT * 100。
+- mean_ack_mbps / ack_peak_ratio_pct：本周期确认吞吐速率（Mbit/s）及其占历史峰值的百分比。
+- retrans_window_pct：本周期内出现重传的秒级窗口占比（%）。
+
+请按以下网络物理规律综合数值判断：
+1. random_loss（随机误码丢包）：rtt_inflation_pct < 18 且 retrans_window_pct >= 65。队列基本为空但持续重传，吞吐偏低系误码降窗所致，选 beta=0.8。
+2. delay_increase（传播时延增加）：rtt_inflation_pct >= 80，同时 ack_peak_ratio_pct >= 75 且 rtt_spread_pct < 7。RTT 大幅抬升但吞吐维持高位、排队波动极小，说明物理路径变长导致带宽时延积增大，选 beta=0.7。
+3. heavy_congestion（带宽骤降拥塞）：rtt_inflation_pct >= 80 且 ack_peak_ratio_pct < 50。RTT 大幅升高且吞吐相对峰值显著跌落，说明队列严重积压，选 beta=0.4 加快排空队列。
+4. low_queue_high_rate（高速浅缓冲轻度排队）：rtt_inflation_pct < 25 且 ack_peak_ratio_pct >= 85 且 retrans_window_pct < 65。吞吐处于高位且排队涨幅很小，选 beta=0.7 避免丢包后排空浅缓冲。
+5. normal_queue（常规排队或多流共享竞争）：其余常规排队情况（如 rtt_inflation_pct 介于 25 与 80 之间，或跳变过渡期指标尚未稳定），选标准 beta=0.5，兼顾时延控制与多流公平共存。
+
+严格输出 JSON 对象，键顺序为 decision_id, reason, state, beta。
+- decision_id：原样复制输入值。
+- reason：简明中文依据（不超过 50 汉字）。
+- state：仅限 "random_loss"、"low_queue_high_rate"、"normal_queue"、"heavy_congestion"、"delay_increase"。
+- beta：仅限 0.4、0.5、0.6、0.7、0.8。
+
+示例1输入：{"decision_id":"ex-1","window_range":[5,12],"mean_rtt_ms":46.5,"min_rtt_ms":44.0,"rtt_inflation_pct":5.7,"rtt_spread_pct":12.0,"mean_ack_mbps":6.1,"ack_peak_ratio_pct":62.0,"retrans_window_pct":100.0}
+示例1输出：{"decision_id":"ex-1","reason":"RTT涨幅仅5.7%队列为空但100%窗口重传，属随机误码丢包，选0.8","state":"random_loss","beta":0.8}
+
+示例2输入：{"decision_id":"ex-2","window_range":[32,39],"mean_rtt_ms":51.8,"min_rtt_ms":44.0,"rtt_inflation_pct":17.7,"rtt_spread_pct":7.2,"mean_ack_mbps":38.4,"ack_peak_ratio_pct":99.5,"retrans_window_pct":37.5}
+示例2输出：{"decision_id":"ex-2","reason":"吞吐占峰值99.5%且RTT涨幅仅17.7%，属浅缓冲轻度排队，选0.7","state":"low_queue_high_rate","beta":0.7}
+
+示例3输入：{"decision_id":"ex-3","window_range":[13,20],"mean_rtt_ms":74.5,"min_rtt_ms":44.0,"rtt_inflation_pct":69.3,"rtt_spread_pct":14.2,"mean_ack_mbps":6.4,"ack_peak_ratio_pct":84.0,"retrans_window_pct":50.0}
+示例3输出：{"decision_id":"ex-3","reason":"RTT涨幅69.3%呈常规排队波动，选0.5兼顾时延与公平","state":"normal_queue","beta":0.5}
+
+示例4输入：{"decision_id":"ex-4","window_range":[61,62],"mean_rtt_ms":165.0,"min_rtt_ms":44.0,"rtt_inflation_pct":275.0,"rtt_spread_pct":24.5,"mean_ack_mbps":2.9,"ack_peak_ratio_pct":7.6,"retrans_window_pct":0.0}
+示例4输出：{"decision_id":"ex-4","reason":"RTT涨幅275%且吞吐跌至峰值7.6%，属带宽骤降重度拥塞，选0.4","state":"heavy_congestion","beta":0.4}
+
+示例5输入：{"decision_id":"ex-5","window_range":[31,38],"mean_rtt_ms":91.5,"min_rtt_ms":44.0,"rtt_inflation_pct":108.0,"rtt_spread_pct":4.1,"mean_ack_mbps":18.8,"ack_peak_ratio_pct":97.5,"retrans_window_pct":12.5}
+示例5输出：{"decision_id":"ex-5","reason":"RTT涨幅108%但吞吐占峰值97.5%且波动仅4.1%，属传播时延增加，选0.7","state":"delay_increase","beta":0.7}
