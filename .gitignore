@@ -12,3 +12,4 @@ __pycache__/
 /.glm-api.lock
 
 .cache/
+/zhipu-api-key.txt
